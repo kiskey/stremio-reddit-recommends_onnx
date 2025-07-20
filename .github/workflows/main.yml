@@ -43,7 +43,7 @@ jobs:
           REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
           REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
-          REDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+          REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
         run: python src/process_reddit.py
       
       - name: Convert Model to ONNX format
