@@ -21,25 +21,25 @@ RECS_DB_FILE = config['DATABASE']['recommendations_database_file']
 print("--- Vibe Recommender (ONNX Edition) ---")
 print(f"Runtime Config: SIMILAR_POST_COUNT={SIMILAR_POST_COUNT}, MAX_RESULTS={MAX_RESULTS}")
 
+# --- Initialize empty data structures ---
+post_vectors = {}
+post_titles = {}
+suggestions_by_post = defaultdict(list)
+DEFAULT_CATALOG_IDS = []
+
 # --- Load Models and Data on Startup ---
 print("Initializing ONNX runtime session for model.onnx...")
 onnx_session = ort.InferenceSession('model.onnx')
 print("ONNX session loaded.")
 
 print(f"Loading tokenizer from model: {MODEL_NAME}")
-# We still need the original tokenizer to convert text to the correct input format for the ONNX model.
-# The tokenizer is very small and has no heavy dependencies.
 tokenizer = SentenceTransformer(MODEL_NAME).tokenizer
 print("Tokenizer loaded.")
 
 # --- Helper function for ONNX inference ---
 def encode_text_onnx(text: str) -> np.ndarray:
     inputs = tokenizer(
-        [text],
-        padding='max_length',
-        truncation=True,
-        max_length=128,
-        return_tensors="np" # Return numpy arrays for ONNX
+        [text], padding='max_length', truncation=True, max_length=128, return_tensors="np"
     )
     onnx_inputs = {key: val for key, val in inputs.items()}
     embedding = onnx_session.run(None, onnx_inputs)[0]
@@ -51,6 +51,7 @@ try:
     conn = sqlite3.connect(f'file:{RECS_DB_FILE}?mode=ro', uri=True)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
+    
     cursor.execute("SELECT post_id, post_title, post_vector FROM posts")
     posts_data = cursor.fetchall()
     post_vectors = {row['post_id']: np.frombuffer(row['post_vector'], dtype=np.float32).reshape(1, -1) for row in posts_data}
@@ -58,7 +59,6 @@ try:
     
     cursor.execute("SELECT post_id, tt_id, upvotes FROM suggestions")
     suggestions_data = cursor.fetchall()
-    suggestions_by_post = defaultdict(list)
     default_catalog_scores = defaultdict(int)
     for row in suggestions_data:
         suggestions_by_post[row['post_id']].append((row['tt_id'], row['upvotes']))
@@ -68,11 +68,11 @@ try:
     
     sorted_default_catalog = sorted(default_catalog_scores.items(), key=lambda item: item[1], reverse=True)
     DEFAULT_CATALOG_IDS = [item[0] for item in sorted_default_catalog]
-    print(f"Loaded {len(post_vectors)} post vectors and {len(suggestions_data)} suggestions.")
+    print(f"Successfully loaded {len(post_vectors)} post vectors and {len(suggestions_data)} suggestions.")
 
 except Exception as e:
-    print(f"Database not found or failed to load: {e}. Please run the GitHub Action to generate it.")
-    post_vectors, DEFAULT_CATALOG_IDS, suggestions_by_post, post_titles = {}, [], defaultdict(list), {}
+    print(f"CRITICAL: Database not found or failed to load: {e}.")
+    print("The addon will run but will return empty results until the database is created.")
 
 app = FastAPI()
 
@@ -110,7 +110,10 @@ async def get_catalog(request: Request, catalog_id: str, search_query: str = Non
         query_vector = encode_text_onnx(search_query)
         
         post_ids = list(post_vectors.keys())
-        all_vectors = np.array(list(post_vectors.values())).squeeze()
+        
+        # This is the more robust way to create the vector matrix
+        all_vectors = np.vstack(list(post_vectors.values()))
+        
         similarities = cosine_similarity(query_vector, all_vectors)[0]
         
         top_indices = np.argsort(similarities)[-SIMILAR_POST_COUNT:][::-1]
@@ -120,10 +123,10 @@ async def get_catalog(request: Request, catalog_id: str, search_query: str = Non
         for post_id in similar_post_ids:
             print(f"  - {post_titles.get(post_id, 'Unknown Title')}")
 
-        weighted_suggestions = {}
+        weighted_suggestions = defaultdict(int)
         for post_id in similar_post_ids:
             for tt_id, upvotes in suggestions_by_post.get(post_id, []):
-                weighted_suggestions[tt_id] = weighted_suggestions.get(tt_id, 0) + upvotes
+                weighted_suggestions[tt_id] += upvotes
         
         sorted_suggestions = sorted(weighted_suggestions.items(), key=lambda item: item[1], reverse=True)
         final_tt_ids = [item[0] for item in sorted_suggestions]
