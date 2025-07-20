@@ -1,3 +1,4 @@
+# src/process_reddit.py
 import praw
 import sqlite3
 import configparser
@@ -7,15 +8,12 @@ from pathlib import Path
 import numpy as np
 import io
 
+# --- Helper functions (no changes) ---
 def adapt_array(arr):
-    out = io.BytesIO()
-    np.save(out, arr)
-    out.seek(0)
+    out = io.BytesIO(); np.save(out, arr); out.seek(0)
     return sqlite3.Binary(out.read())
-
 def convert_array(text):
-    out = io.BytesIO(text)
-    out.seek(0)
+    out = io.BytesIO(text); out.seek(0)
     return np.load(out)
 
 sqlite3.register_adapter(np.ndarray, adapt_array)
@@ -38,10 +36,8 @@ def process_data():
 
     print("Initializing PRAW for Reddit...")
     reddit = praw.Reddit(
-        client_id=os.environ['REDDIT_CLIENT_ID'],
-        client_secret=os.environ['REDDIT_CLIENT_SECRET'],
-        user_agent=os.environ['REDDIT_USER_AGENT'],
-        username=os.environ['REDDIT_USERNAME'],
+        client_id=os.environ['REDDIT_CLIENT_ID'], client_secret=os.environ['REDDIT_CLIENT_SECRET'],
+        user_agent=os.environ['REDDIT_USER_AGENT'], username=os.environ['REDDIT_USERNAME'],
         password=os.environ['REDDIT_PASSWORD'],
     )
 
@@ -52,16 +48,16 @@ def process_data():
 
     recs_cursor.execute('''
         CREATE TABLE IF NOT EXISTS posts (
-            post_id TEXT PRIMARY KEY,
-            post_title TEXT,
-            post_vector array
+            post_id TEXT PRIMARY KEY, post_title TEXT, post_vector array
         )
     ''')
+    # --- ENHANCEMENT: Added 'title' column to store the movie name ---
     recs_cursor.execute('''
         CREATE TABLE IF NOT EXISTS suggestions (
             suggestion_id INTEGER PRIMARY KEY AUTOINCREMENT,
             post_id TEXT,
             tt_id TEXT,
+            title TEXT, 
             upvotes INTEGER,
             FOREIGN KEY(post_id) REFERENCES posts(post_id)
         )
@@ -72,40 +68,36 @@ def process_data():
         subreddit = reddit.subreddit(sub)
         try:
             for post in subreddit.hot(limit=POST_LIMIT):
-                if post.score < POST_SCORE_THRESH or not post.is_self or post.stickied:
-                    continue
-
+                if post.score < POST_SCORE_THRESH or not post.is_self or post.stickied: continue
                 print(f"\nProcessing Post: '{post.title[:50]}...' (Score: {post.score})")
-                
                 post_vector = model.encode(post.title)
                 recs_cursor.execute("INSERT OR IGNORE INTO posts (post_id, post_title, post_vector) VALUES (?, ?, ?)",
                                   (post.id, post.title, post_vector))
-
                 post.comments.replace_more(limit=0)
                 for comment in post.comments.list():
                     if comment.score >= COMMENT_SCORE_THRESH:
                         movie_titles = [line.strip() for line in comment.body.split('\n') if line.strip()]
-                        for title in movie_titles:
-                            cleaned_title = title.lower().strip().replace('*', '').replace('"', '')
+                        for title_text in movie_titles:
+                            cleaned_title = title_text.lower().strip().replace('*', '').replace('"', '')
                             imdb_cursor = imdb_conn.cursor()
-                            imdb_cursor.execute("SELECT tconst FROM movies WHERE cleaned_title = ?", (cleaned_title,))
+                            # --- ENHANCEMENT: Fetch the primaryTitle along with the ID ---
+                            imdb_cursor.execute("SELECT tconst, primaryTitle FROM movies WHERE cleaned_title = ?", (cleaned_title,))
                             result = imdb_cursor.fetchone()
                             
                             if result:
-                                tt_id = result[0]
-                                print(f"  [MATCH FOUND] '{title}' -> {tt_id}")
+                                tt_id, movie_title = result[0], result[1]
+                                print(f"  [MATCH FOUND] '{title_text}' -> {tt_id} ({movie_title})")
+                                # --- ENHANCEMENT: Insert the movie_title into the database ---
                                 recs_cursor.execute(
-                                    "INSERT INTO suggestions (post_id, tt_id, upvotes) VALUES (?, ?, ?)",
-                                    (post.id, tt_id, comment.score)
+                                    "INSERT INTO suggestions (post_id, tt_id, title, upvotes) VALUES (?, ?, ?, ?)",
+                                    (post.id, tt_id, movie_title, comment.score)
                                 )
         except Exception as e:
             print(f"An error occurred while processing r/{sub}: {e}")
             continue
 
     print("\nCommitting changes and closing database connections.")
-    recs_conn.commit()
-    recs_conn.close()
-    imdb_conn.close()
+    recs_conn.commit(); recs_conn.close(); imdb_conn.close()
     print("Processing complete.")
 
 if __name__ == "__main__":
