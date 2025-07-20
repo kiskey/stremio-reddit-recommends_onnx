@@ -3,13 +3,10 @@ name: Process Data, Convert Model, and Publish to GHCR
 on:
   schedule:
     - cron: '0 5 * * *'
-#  push:
-#    branches:
-#      - main
   workflow_dispatch:
 
 jobs:
-  # This job creates the database and the ONNX model
+  # This job creates the database and the ONNX model and commits them to the repo
   build-assets:
     runs-on: ubuntu-latest
     permissions:
@@ -23,19 +20,41 @@ jobs:
         with:
           python-version: '3.11'
       
+      # --- ADDED: Cache pip dependencies for speed ---
+      - name: Cache Pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-build.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install Build Dependencies
         run: pip install -r requirements-build.txt
 
       - name: Create data directory
         run: mkdir -p ./data
+      
+      # --- ADDED: Cache IMDb datasets for speed ---
+      - name: Cache IMDb Datasets
+        id: cache-imdb
+        uses: actions/cache@v4
+        with:
+          path: ./data/*.tsv.gz
+          key: ${{ runner.os }}-imdb-data-v1
 
-      - name: Download IMDb Datasets
+      - name: Download IMDb Datasets if not cached
+        if: steps.cache-imdb.outputs.cache-hit != 'true'
         run: |
+          echo "Cache not found, downloading IMDb data..."
           wget -q -O ./data/title.basics.tsv.gz https://datasets.imdbws.com/title.basics.tsv.gz
           wget -q -O ./data/title.ratings.tsv.gz https://datasets.imdbws.com/title.ratings.tsv.gz
       
       - name: Build Local IMDb Database
         run: python src/build_imdb_db.py
+        
+      - name: Convert Model to ONNX format
+        run: python src/convert_model_to_onnx.py
 
       - name: Process Reddit Data to create recommendations.db
         env:
@@ -46,26 +65,16 @@ jobs:
           REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
         run: python src/process_reddit.py
       
-      - name: Convert Model to ONNX format
-        run: python src/convert_model_to_onnx.py
-
-      - name: Upload Artifacts for Docker Build
-        uses: actions/upload-artifact@v4
-        with:
-          name: addon-assets
-          path: |
-            recommendations.db
-            model.onnx
-
-      - name: Commit and Push Database
+      - name: Commit and Push All Assets
         run: |
           git config --global user.name 'GitHub Actions Bot'
           git config --global user.email 'actions-bot@github.com'
-          git add -f recommendations.db
-          git diff --staged --quiet || git commit -m "Update recommendations database"
+          # Add both the database and the new onnx_model directory
+          git add -f recommendations.db onnx_model/
+          git diff --staged --quiet || git commit -m "Update recommendations database and ONNX model"
           git push
 
-  # This job builds the final, lightweight Docker image
+  # This job waits for the assets to be committed, then builds the final image
   build-and-push-docker:
     needs: build-assets
     runs-on: ubuntu-latest
@@ -74,12 +83,10 @@ jobs:
       packages: write
     steps:
       - name: Checkout repository
+        # This checkout gets the code AND the freshly committed database and model
         uses: actions/checkout@v4
 
-      - name: Download Addon Assets
-        uses: actions/download-artifact@v4
-        with:
-          name: addon-assets
+      # --- REMOVED: No longer need to download artifacts ---
       
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -97,6 +104,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+          tags: ghcr.io/${{ github.repository }}:latest
+          # Use GHA cache for faster Docker builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
