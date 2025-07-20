@@ -14,9 +14,9 @@ import re
 # --- Config and Env Vars (no changes) ---
 config = configparser.ConfigParser(); config.read('config.ini')
 SIMILAR_POST_COUNT = int(os.getenv('SIMILAR_POST_COUNT', config['NLP']['similar_post_count']))
-PAGE_SIZE = int(os.getenv('MAX_RESULTS', 100)) # Renamed for clarity
+PAGE_SIZE = int(os.getenv('MAX_RESULTS', 100))
 RECS_DB_FILE = config['DATABASE']['recommendations_database_file']
-print("--- Vibe Recommender (ONNX Edition) v1.3 ---")
+print("--- Vibe Recommender (ONNX Edition) v1.4 ---")
 
 # --- Initialize data structures (no changes) ---
 post_vectors, post_titles = {}, {}; suggestions_by_post = defaultdict(list)
@@ -26,7 +26,7 @@ DEFAULT_CATALOG = []; tokenizer, onnx_session = None, None
 try:
     onnx_session = ort.InferenceSession('onnx_model/model.onnx')
     tokenizer = AutoTokenizer.from_pretrained('onnx_model')
-    print("ONNX session and tokenizer loaded.")
+    print("ONNX session and tokenizer loaded successfully.")
 except Exception as e: print(f"CRITICAL: Failed to load AI model or tokenizer: {e}")
 
 # --- Helper functions (no changes) ---
@@ -49,38 +49,47 @@ try:
     post_vectors = {row['post_id']: np.frombuffer(row['post_vector'], dtype=np.float32).reshape(1, -1) for row in posts_data}
     post_titles = {row['post_id']: row['post_title'] for row in posts_data}
     
-    # --- ENHANCEMENT: Fetch the 'title' column ---
     cursor.execute("SELECT post_id, tt_id, title, upvotes FROM suggestions"); suggestions_data = cursor.fetchall()
     
-    # --- ENHANCEMENT: Store title along with ID and upvotes ---
-    default_catalog_scores = defaultdict(lambda: {'score': 0, 'title': ''})
+    # --- BUG FIX: Rewritten startup logic for robustness and clarity ---
+    temp_scores = {}
     for row in suggestions_data:
+        # Populate suggestions for the search logic
         suggestions_by_post[row['post_id']].append({"id": row['tt_id'], "title": row['title'], "upvotes": row['upvotes']})
-        current_entry = default_catalog_scores[row['tt_id']]
-        current_entry['score'] += row['upvotes']
-        current_entry['title'] = row['title'] # Keep the latest title found
+        
+        # Aggregate scores for the default catalog
+        tt_id = row['tt_id']
+        if tt_id not in temp_scores:
+            temp_scores[tt_id] = {'score': 0, 'title': row['title']}
+        temp_scores[tt_id]['score'] += row['upvotes']
 
     conn.close()
     
-    # --- ENHANCEMENT: Create a list of dicts for the default catalog ---
-    sorted_default_catalog = sorted(default_catalog_scores.items(), key=lambda item: item[1]['score'], reverse=True)
+    # Sort the aggregated scores to create the final default catalog
+    sorted_default_catalog = sorted(temp_scores.items(), key=lambda item: item[1]['score'], reverse=True)
     DEFAULT_CATALOG = [{"id": item[0], "title": item[1]['title']} for item in sorted_default_catalog]
     
-    print(f"Successfully loaded {len(post_vectors)} post vectors and {len(suggestions_data)} suggestions.")
+    # --- ADDED: Better logging for debugging ---
+    print(f"Successfully loaded {len(posts_data)} post vectors.")
+    print(f"Successfully loaded {len(suggestions_data)} total suggestions from the database.")
+    print(f"Default catalog created with {len(DEFAULT_CATALOG)} unique movies.")
+    if not DEFAULT_CATALOG:
+        print("WARNING: Default catalog is empty. This might happen if the database is new or empty.")
+
 except Exception as e: print(f"CRITICAL: Database not found or failed to load: {e}.")
 
 app = FastAPI()
 
-# --- Manifest (no changes) ---
+# --- Manifest (no changes, your version is fine) ---
 @app.get("/manifest.json")
 async def get_manifest():
     return {
-        "id": "com.mjlan.reddit-vibe-recommender-onnx", "version": "1.3.0", "name": "Reddit Vibe (ONNX)",
+        "id": "com.mjlan.reddit-vibe-recommender-onnx", "version": "1.4.0", "name": "Reddit Vibe (ONNX)",
         "description": "Reddit vibes based Hyper-optimized movie recommendations", "resources": ["catalog"], "types": ["movie"],
         "catalogs": [{"type": "movie", "id": "reddit-vibe-catalog", "name": "Reddit Vibe Search", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]}]
     }
 
-# --- Central logic function ---
+# --- Central logic function (identical to previous correct version) ---
 async def _get_catalog_logic(search_query: str = None, skip: int = 0):
     final_items = []
     if search_query:
@@ -90,37 +99,20 @@ async def _get_catalog_logic(search_query: str = None, skip: int = 0):
         query_vector = encode_text_onnx(search_query); post_ids, all_vectors = list(post_vectors.keys()), np.vstack(list(post_vectors.values()))
         similarities = cosine_similarity(query_vector, all_vectors)[0]; top_indices = np.argsort(similarities)[-SIMILAR_POST_COUNT:][::-1]
         similar_post_ids = [post_ids[i] for i in top_indices]
-        
-        # --- ENHANCEMENT: Aggregate suggestions to include titles ---
         weighted_suggestions = defaultdict(lambda: {'score': 0, 'title': ''})
         for post_id in similar_post_ids:
             for suggestion in suggestions_by_post.get(post_id, []):
-                entry = weighted_suggestions[suggestion['id']]
-                entry['score'] += suggestion['upvotes']
-                entry['title'] = suggestion['title'] # Keep latest title
-        
+                entry = weighted_suggestions[suggestion['id']]; entry['score'] += suggestion['upvotes']; entry['title'] = suggestion['title']
         sorted_suggestions = sorted(weighted_suggestions.items(), key=lambda item: item[1]['score'], reverse=True)
         final_items = [{"id": item[0], "title": item[1]['title']} for item in sorted_suggestions]
     else:
         print(f"Serving default catalog, skipping: {skip}")
         final_items = DEFAULT_CATALOG
-    
-    # --- ENHANCEMENT: Paginate the final list of dicts ---
     paginated_items = final_items[skip : skip + PAGE_SIZE]
-    
-    # --- ENHANCEMENT: Use the item's title in the meta object ---
-    metas = []
-    for item in paginated_items:
-        metas.append({
-            "id": item['id'],
-            "type": "movie",
-            "name": item['title'], # Use the correct movie title
-            "poster": f"https://images.metahub.space/poster/medium/{item['id']}/img",
-            "posterShape": "poster"
-        })
+    metas = [{"id": item['id'], "type": "movie", "name": item['title'], "poster": f"https://images.metahub.space/poster/medium/{item['id']}/img", "posterShape": "poster"} for item in paginated_items]
     return {"metas": metas}
 
-# --- Routing (no changes) ---
+# --- Routing (identical to previous correct version) ---
 @app.get("/catalog/movie/{catalog_id}.json")
 async def get_default_catalog(catalog_id: str):
     if catalog_id != "reddit-vibe-catalog": return JSONResponse(status_code=404, content={"error": "Catalog not found"})
@@ -134,4 +126,4 @@ async def get_catalog_with_extras(catalog_id: str, extra_props: str):
     return await _get_catalog_logic(search_query=search_query, skip=skip)
 
 @app.get("/")
-async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v1.3 is running."}
+async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v1.4 is running."}
