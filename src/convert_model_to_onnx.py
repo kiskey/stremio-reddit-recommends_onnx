@@ -4,6 +4,10 @@ import configparser
 from pathlib import Path
 
 def convert():
+    """
+    Loads a SentenceTransformer model and exports it to the ONNX format.
+    This allows for a much smaller and faster runtime environment.
+    """
     config = configparser.ConfigParser()
     config.read('config.ini')
     MODEL_NAME = config['NLP']['sentence_transformer_model']
@@ -19,7 +23,9 @@ def convert():
 
     print("Creating dummy input for ONNX export...")
     dummy_text = "This is a dummy sentence."
-    dummy_input = tokenizer(
+    
+    # This still produces the "fancy box" BatchEncoding object
+    tokenized_input = tokenizer(
         [dummy_text],
         padding='max_length',
         truncation=True,
@@ -27,10 +33,18 @@ def convert():
         return_tensors="pt"
     )
 
+    # --- THIS IS THE FIX ---
+    # We convert the "fancy box" into a plain, standard Python dictionary.
+    # This is the format the ONNX exporter's JIT tracer understands.
+    onnx_input = dict(tokenized_input)
+    
     print(f"Exporting model to ONNX format at: {output_path}")
+    # The ONNX export needs the model, a tuple of args,
+    # the output path, and names for the input/output nodes.
     torch.onnx.export(
         model,
-        (dummy_input,),
+        # We pass our plain dictionary as the only argument inside a tuple.
+        args=(onnx_input,),
         f=output_path,
         input_names=['input_ids', 'attention_mask', 'token_type_ids'],
         output_names=['sentence_embedding'],
