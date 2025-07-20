@@ -43,11 +43,13 @@ ENV MAX_RESULTS=100
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-  CMD python -c "import sys, urllib.request; \
-  try: \
-      urllib.request.urlopen('http://localhost:8000/manifest.json', timeout=5).read() \
-  except Exception: \
-      sys.exit(1)"
+  CMD [ "python", "-c", "import sys, urllib.request; \
+    try: \
+        res = urllib.request.urlopen('http://localhost:8000/manifest.json', timeout=5); \
+        if res.status >= 400: sys.exit(1); \
+    except Exception: \
+        sys.exit(1); \
+    sys.exit(0)" ]
 
 # The CMD line to run the lightweight server
 CMD gunicorn -w $WORKERS -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000 --log-level $LOG_LEVEL
