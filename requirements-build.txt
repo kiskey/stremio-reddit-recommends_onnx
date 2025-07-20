@@ -1,0 +1,7 @@
+# For data processing and model conversion
+pandas
+praw
+sentence-transformers
+torch
+onnx
+onnxruntime
