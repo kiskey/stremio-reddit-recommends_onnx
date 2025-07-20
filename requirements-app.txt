@@ -5,4 +5,7 @@ uvicorn
 numpy
 scikit-learn
 onnxruntime
-sentence-transformers
+
+# Dependencies required by sentence-transformers for tokenization
+transformers>=4.6.0
+tokenizers>=0.13.3
