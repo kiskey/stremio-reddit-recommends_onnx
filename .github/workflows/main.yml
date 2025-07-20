@@ -1,0 +1,102 @@
+name: Process Data, Convert Model, and Publish to GHCR
+
+on:
+  schedule:
+    - cron: '0 5 * * *'
+#  push:
+#    branches:
+#      - main
+  workflow_dispatch:
+
+jobs:
+  # This job creates the database and the ONNX model
+  build-assets:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install Build Dependencies
+        run: pip install -r requirements-build.txt
+
+      - name: Create data directory
+        run: mkdir -p ./data
+
+      - name: Download IMDb Datasets
+        run: |
+          wget -q -O ./data/title.basics.tsv.gz https://datasets.imdbws.com/title.basics.tsv.gz
+          wget -q -O ./data/title.ratings.tsv.gz https://datasets.imdbws.com/title.ratings.tsv.gz
+      
+      - name: Build Local IMDb Database
+        run: python src/build_imdb_db.py
+
+      - name: Process Reddit Data to create recommendations.db
+        env:
+          REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+          REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+          REDDIT_USER_AGENT: ${{ secrets.REDDIT_USER_AGENT }}
+          REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
+          REDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
+        run: python src/process_reddit.py
+      
+      - name: Convert Model to ONNX format
+        run: python src/convert_model_to_onnx.py
+
+      - name: Upload Artifacts for Docker Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: addon-assets
+          path: |
+            recommendations.db
+            model.onnx
+
+      - name: Commit and Push Database
+        run: |
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'actions-bot@github.com'
+          git add -f recommendations.db
+          git diff --staged --quiet || git commit -m "Update recommendations database"
+          git push
+
+  # This job builds the final, lightweight Docker image
+  build-and-push-docker:
+    needs: build-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Addon Assets
+        uses: actions/download-artifact@v4
+        with:
+          name: addon-assets
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image to GHCR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
