@@ -83,10 +83,10 @@ app = FastAPI()
 @app.get("/manifest.json")
 async def get_manifest():
     return {
-        "id": "com.yourname.reddit-vibe-recommender-onnx",
-        "version": "1.1.0", # Incremented version
+        "id": "com.mjlan.reddit-vibe-recommender-onnx",
+        "version": "1.1.0", 
         "name": "Reddit Vibe (ONNX)",
-        "description": "Hyper-optimized movie recommendations with posters and pagination.",
+        "description": "Reddit vibes based Hyper-optimized movie recommendations",
         "resources": ["catalog"],
         "types": ["movie"],
         "catalogs": [
