@@ -1,26 +1,12 @@
 import torch
-import torch.nn as nn
 from sentence_transformers import SentenceTransformer
 import configparser
 from pathlib import Path
 
-# --- THE FIX: The Adapter/Wrapper Class ---
-# This simple module acts as an adapter. Its forward method has a signature
-# that the ONNX JIT tracer can understand (it accepts a dictionary).
-# It then correctly unpacks that dictionary into keyword arguments for the real model.
-class OnnxWrapper(nn.Module):
-    def __init__(self, model):
-        super().__init__()
-        self.model = model
-
-    def forward(self, input_dict):
-        # The key is the double-asterisk (**), which unpacks the dictionary
-        # into keyword arguments (e.g., input_ids=..., attention_mask=...).
-        return self.model(**input_dict)
-
 def convert():
     """
     Loads a SentenceTransformer model and exports it to the ONNX format.
+    This is the robust, production-ready method.
     """
     config = configparser.ConfigParser()
     config.read('config.ini')
@@ -33,11 +19,7 @@ def convert():
 
     print(f"Loading SentenceTransformer model: {MODEL_NAME}")
     model = SentenceTransformer(MODEL_NAME)
-    
-    print("Wrapping model in ONNX-compatible adapter...")
-    # We wrap our loaded model in the new adapter class.
-    wrapped_model = OnnxWrapper(model)
-    wrapped_model.eval() # Set the model to evaluation mode
+    model.eval() # Set the model to evaluation mode
 
     tokenizer = model[0].tokenizer
 
@@ -55,13 +37,25 @@ def convert():
     # Convert the BatchEncoding to a standard Python dictionary.
     onnx_input = dict(tokenized_input)
     
+    # --- THIS IS THE FIX ---
+    # The ONNX exporter's tracer works most reliably when given a flat tuple
+    # of tensors as input, not a dictionary. The order must match the
+    # model's internal forward() method. For BERT-like models, this is standard.
+    args_tuple = (
+        onnx_input['input_ids'],
+        onnx_input['attention_mask'],
+        onnx_input['token_type_ids']
+    )
+    
     print(f"Exporting model to ONNX format at: {output_path}")
 
-    # Now, we export the wrapped_model, not the original model.
+    # We now export the original model directly, but pass the tensors as a tuple.
     torch.onnx.export(
-        wrapped_model,
-        args=(onnx_input,), # The input remains a dictionary in a tuple
+        model,
+        args=args_tuple,
         f=output_path,
+        # The input_names list maps the positional arguments from our tuple
+        # to the named inputs that the final ONNX model will expect.
         input_names=['input_ids', 'attention_mask', 'token_type_ids'],
         output_names=['sentence_embedding'],
         dynamic_axes={
