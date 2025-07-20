@@ -1,0 +1,8 @@
+# For the lightweight web app and ONNX inference
+fastapi
+gunicorn
+uvicorn
+numpy
+scikit-learn
+onnxruntime
+sentence-transformers
