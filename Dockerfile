@@ -45,4 +45,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
   CMD [ "python", "healthcheck.py" ]
 
 # The CMD line to run the app remains the same
-CMD ["gunicorn", "-w", "$WORKERS", "-k", "uvicorn.workers.UvicornWorker", "main:app", "--bind", "0.0.0.0:8000", "--log-level", "$LOG_LEVEL"]
+CMD gunicorn -w $WORKERS -k uvicorn.workers.UvicornWorker main:app --bind 0.0.0.0:8000 --log-level $LOG_LEVEL
