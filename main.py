@@ -7,7 +7,7 @@ from collections import defaultdict
 import configparser
 import os
 import onnxruntime as ort
-from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer
 
 # --- Load Config and Environment Variables ---
 config = configparser.ConfigParser()
@@ -21,23 +21,36 @@ RECS_DB_FILE = config['DATABASE']['recommendations_database_file']
 print("--- Vibe Recommender (ONNX Edition) ---")
 print(f"Runtime Config: SIMILAR_POST_COUNT={SIMILAR_POST_COUNT}, MAX_RESULTS={MAX_RESULTS}")
 
-# --- Initialize empty data structures ---
+# --- Initialize empty data structures for robust startup ---
 post_vectors = {}
 post_titles = {}
 suggestions_by_post = defaultdict(list)
 DEFAULT_CATALOG_IDS = []
+tokenizer = None
+onnx_session = None
 
 # --- Load Models and Data on Startup ---
-print("Initializing ONNX runtime session for model.onnx...")
-onnx_session = ort.InferenceSession('model.onnx')
-print("ONNX session loaded.")
+try:
+    print("Initializing ONNX runtime session for model.onnx...")
+    onnx_session = ort.InferenceSession('model.onnx')
+    print("ONNX session loaded.")
 
-print(f"Loading tokenizer from model: {MODEL_NAME}")
-tokenizer = SentenceTransformer(MODEL_NAME).tokenizer
-print("Tokenizer loaded.")
+    print(f"Loading tokenizer directly from pretrained model: {MODEL_NAME}")
+    # We load the tokenizer directly from the Hugging Face hub.
+    # This is more robust and decouples us from the sentence-transformers library at runtime.
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    print("Tokenizer loaded.")
+
+except Exception as e:
+    print(f"CRITICAL: Failed to load AI model or tokenizer: {e}")
+    print("The addon will not be able to perform searches.")
 
 # --- Helper function for ONNX inference ---
 def encode_text_onnx(text: str) -> np.ndarray:
+    if not tokenizer or not onnx_session:
+        # Return an empty array if models aren't loaded, to prevent crashes.
+        return np.array([])
+
     inputs = tokenizer(
         [text], padding='max_length', truncation=True, max_length=128, return_tensors="np"
     )
@@ -100,12 +113,15 @@ async def get_manifest():
 async def get_catalog(request: Request, catalog_id: str, search_query: str = None):
     if catalog_id != "reddit-vibe-catalog":
         return JSONResponse(status_code=404, content={"error": "Catalog not found"})
-    if not post_vectors:
-        return {"metas": []}
     
     final_tt_ids = []
 
     if search_query:
+        if not tokenizer or not onnx_session:
+            return JSONResponse(status_code=503, content={"error": "AI models not loaded"})
+        if not post_vectors:
+             return {"metas": []}
+
         print(f"Handling search query: '{search_query}'")
         query_vector = encode_text_onnx(search_query)
         
