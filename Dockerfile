@@ -1,16 +1,14 @@
 # ===================================================================
-# STAGE 1: The "Builder" - Our temporary workshop
+# STAGE 1: The "Builder" stage - only used to cache build dependencies
+# This stage isn't strictly necessary with the new workflow but is
+# good practice if you ever need to compile complex packages.
+# For simplicity, we can remove it, but let's keep it for best practice.
 # ===================================================================
 FROM python:3.11-slim as builder
 
-WORKDIR /app
-
-# Install all build-time dependencies
-COPY requirements-build.txt .
-RUN pip install --no-cache-dir -r requirements-build.txt
-
-# This stage doesn't need to do anything else. All asset creation
-# is now handled by the GitHub Actions workflow directly.
+# This stage is just a placeholder in our new workflow, as all asset
+# creation happens outside the Docker build. We could use it to
+# pre-install dependencies if needed, but we will do that in the final stage.
 
 # ===================================================================
 # STAGE 2: The "Final" - Our slim, production-ready shipping crate
@@ -31,7 +29,7 @@ RUN pip install --no-cache-dir -r requirements-app.txt
 COPY onnx_model/ /app/onnx_model/
 
 # Copy our application code and the database
-COPY src/ /app/src/
+# Note: We don't need to copy src/ as it's not used by main.py
 COPY main.py .
 COPY config.ini .
 COPY recommendations.db .
