@@ -9,17 +9,25 @@ import os
 import onnxruntime as ort
 from transformers import AutoTokenizer
 import re
+import io
 
 # --- Config and Env Vars ---
 config = configparser.ConfigParser(); config.read('config.ini')
 SIMILAR_POST_COUNT = int(os.getenv('SIMILAR_POST_COUNT', config['NLP']['similar_post_count']))
 PAGE_SIZE = int(os.getenv('MAX_RESULTS', 100))
 RECS_DB_FILE = config['DATABASE']['recommendations_database_file']
-print("--- Vibe Recommender (ONNX Edition) v1.5 ---") # Final version
+print("--- Vibe Recommender (ONNX Edition) v1.6 (Final) ---")
 
 # --- Initialize data structures ---
 post_vectors, post_titles = {}, {}; suggestions_by_post = defaultdict(list)
 DEFAULT_CATALOG = []; tokenizer, onnx_session = None, None
+
+# --- BUG FIX: Define the correct data converter function for loading ---
+def npy_blob_to_array(text):
+    out = io.BytesIO(text)
+    out.seek(0)
+    # Use np.load, the correct counterpart to np.save
+    return np.load(out)
 
 # --- Load Models ---
 try:
@@ -34,14 +42,10 @@ def mean_pooling(model_output, attention_mask):
     sum_embeddings = np.sum(token_embeddings * input_mask_expanded, 1); sum_mask = np.clip(input_mask_expanded.sum(1), a_min=1e-9, a_max=None)
     return sum_embeddings / sum_mask
 def normalize(embeddings): return embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-
 def encode_text_onnx(text: str) -> np.ndarray:
     if not tokenizer or not onnx_session: return np.array([])
     inputs = tokenizer([text], padding=True, truncation=True, return_tensors="np")
-    
-    # --- BUG FIX: Explicitly provide only the inputs the ONNX model expects ---
     onnx_inputs = {'input_ids': inputs['input_ids'], 'attention_mask': inputs['attention_mask']}
-    
     raw_output = onnx_session.run(None, onnx_inputs)
     pooled = mean_pooling(raw_output, inputs['attention_mask']); return normalize(pooled)
 
@@ -50,8 +54,11 @@ print(f"Loading recommendations database: {RECS_DB_FILE}")
 try:
     conn = sqlite3.connect(f'file:{RECS_DB_FILE}?mode=ro', uri=True); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
     cursor.execute("SELECT post_id, post_title, post_vector FROM posts"); posts_data = cursor.fetchall()
-    post_vectors = {row['post_id']: np.frombuffer(row['post_vector'], dtype=np.float32).reshape(1, -1) for row in posts_data}
+    
+    # --- BUG FIX: Use the correct conversion logic when loading vectors ---
+    post_vectors = {row['post_id']: npy_blob_to_array(row['post_vector']) for row in posts_data}
     post_titles = {row['post_id']: row['post_title'] for row in posts_data}
+    
     cursor.execute("SELECT post_id, tt_id, title, upvotes FROM suggestions"); suggestions_data = cursor.fetchall()
     temp_scores = {}
     for row in suggestions_data:
@@ -61,7 +68,8 @@ try:
     conn.close()
     sorted_default_catalog = sorted(temp_scores.items(), key=lambda item: item[1]['score'], reverse=True)
     DEFAULT_CATALOG = [{"id": item[0], "title": item[1]['title']} for item in sorted_default_catalog]
-    print(f"Successfully loaded {len(posts_data)} post vectors and {len(suggestions_data)} suggestions. Default catalog has {len(DEFAULT_CATALOG)} items.")
+    print(f"Successfully loaded {len(post_vectors)} post vectors.")
+    print(f"Default catalog created with {len(DEFAULT_CATALOG)} unique movies.")
 except Exception as e: print(f"CRITICAL: Database not found or failed to load: {e}.")
 
 app = FastAPI()
@@ -70,7 +78,7 @@ app = FastAPI()
 @app.get("/manifest.json")
 async def get_manifest():
     return {
-        "id": "com.mjlan.reddit-vibe-recommender-onnx", "version": "1.5.0", "name": "Reddit Vibe (ONNX)",
+        "id": "com.mjlan.reddit-vibe-recommender-onnx", "version": "1.6.0", "name": "Reddit Vibe (ONNX)",
         "description": "Reddit vibes based Hyper-optimized movie recommendations", "resources": ["catalog"], "types": ["movie"],
         "catalogs": [{"type": "movie", "id": "reddit-vibe-catalog", "name": "Reddit Vibe Search", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]}]
     }
@@ -83,7 +91,12 @@ async def _get_catalog_logic(search_query: str = None, skip: int = 0):
         if not post_vectors: return {"metas": []}
         print(f"Handling search query: '{search_query}', skipping: {skip}")
         query_vector = encode_text_onnx(search_query)
-        post_ids, all_vectors = list(post_vectors.keys()), np.vstack(list(post_vectors.values()))
+        
+        # --- BUG FIX: Ensure vectors are correctly shaped for cosine_similarity ---
+        post_ids = list(post_vectors.keys())
+        # vstack expects a list of arrays, which post_vectors.values() already is
+        all_vectors = np.vstack(list(post_vectors.values()))
+        
         similarities = cosine_similarity(query_vector, all_vectors)[0]
         top_indices = np.argsort(similarities)[-SIMILAR_POST_COUNT:][::-1]
         similar_post_ids = [post_ids[i] for i in top_indices]
@@ -115,4 +128,4 @@ async def get_catalog_with_extras(catalog_id: str, extra_props: str):
     return await _get_catalog_logic(search_query=search_query, skip=skip)
 
 @app.get("/")
-async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v1.5 is running."}
+async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v1.6 is running."}
