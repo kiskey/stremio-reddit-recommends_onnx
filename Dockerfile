@@ -22,6 +22,7 @@ COPY main.py .
 COPY config.ini .
 COPY recommendations.db .
 COPY healthcheck.py .
+COPY imdb_lookup.db .
 
 # --- Set environment variables ---
 ENV WORKERS=2
