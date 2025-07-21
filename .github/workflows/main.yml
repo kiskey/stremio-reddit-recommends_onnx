@@ -6,15 +6,13 @@ on:
   workflow_dispatch:
 
 jobs:
-  # A single job to handle the entire end-to-end process
   build-and-publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Needed to commit the database back
-      packages: write # Needed to push the Docker image to GHCR
+      contents: write
+      packages: write
 
     steps:
-      # --- SETUP AND DATA PROCESSING ---
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -42,13 +40,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ./data/*.tsv.gz
-          key: ${{ runner.os }}-imdb-data-v1
+          key: ${{ runner.os }}-imdb-data-v2 # Incremented key for a fresh cache
+          restore-keys: |
+            ${{ runner.os }}-imdb-data-
 
       - name: Download IMDb Datasets if not cached
         if: steps.cache-imdb.outputs.cache-hit != 'true'
         run: |
+          echo "Cache not found, downloading all required IMDb data..."
           wget -q -O ./data/title.basics.tsv.gz https://datasets.imdbws.com/title.basics.tsv.gz
           wget -q -O ./data/title.ratings.tsv.gz https://datasets.imdbws.com/title.ratings.tsv.gz
+          # --- THE CRITICAL FIX: Added the missing download command ---
+          wget -q -O ./data/title.akas.tsv.gz https://datasets.imdbws.com/title.akas.tsv.gz
       
       - name: Build Local IMDb Database
         run: python src/build_imdb_db.py
@@ -64,9 +67,6 @@ jobs:
           REDDIT_USERNAME: ${{ secrets.REDDIT_USERNAME }}
           REDDIT_PASSWORD: ${{ secrets.REDDIT_PASSWORD }}
         run: python src/process_reddit.py
-
-      # --- DOCKER BUILD AND PUSH ---
-      # Now we build the Docker image in the same job, so it can see the new files.
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -85,12 +85,9 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ghcr.io/${{ github.repository }}:latest
-          # Use GHA cache for faster subsequent Docker builds
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # --- FINAL STEP: COMMIT ASSETS ---
-      # We do this at the end. The next run will check out these new files.
       - name: Commit and Push All Assets
         run: |
           git config --global user.name 'GitHub Actions Bot'
