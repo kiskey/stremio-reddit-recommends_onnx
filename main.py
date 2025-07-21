@@ -10,6 +10,15 @@ import onnxruntime as ort
 from transformers import AutoTokenizer
 import re
 import io
+import logging
+
+# --- ENHANCEMENT: Configure proper logging ---
+# This will be captured reliably by Gunicorn/Docker.
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO').upper(),
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True # Ensures our configuration takes precedence
+)
 
 # --- Config and Env Vars ---
 config = configparser.ConfigParser(); config.read('config.ini')
@@ -18,14 +27,13 @@ PAGE_SIZE = int(os.getenv('MAX_RESULTS', 100))
 RECS_DB_FILE = config['DATABASE']['recommendations_database_file']
 IMDB_DB_FILE = config['DATABASE']['imdb_database_file']
 
-# --- Runtime Filter Configuration ---
 KID_FRIENDLY_MODE = os.getenv('KID_FRIENDLY_MODE', 'false').lower() == 'true'
 MIN_IMDB_RATING = float(os.getenv('MIN_IMDB_RATING', '5.2'))
 ACCEPTABLE_RATINGS = {'G', 'PG', 'PG-13', 'NR'}
 
-print("--- Vibe Recommender (ONNX Edition) v1.8 (Definitive) ---")
-print(f"Kid-Friendly Mode: {KID_FRIENDLY_MODE}")
-print(f"Minimum IMDb Rating Filter: {MIN_IMDB_RATING}")
+logging.info("--- Vibe Recommender (ONNX Edition) v1.9 (Final w/ Logging) ---")
+logging.info(f"Kid-Friendly Mode: {KID_FRIENDLY_MODE}")
+logging.info(f"Minimum IMDb Rating Filter: {MIN_IMDB_RATING}")
 
 # --- Initialize data structures ---
 post_vectors, post_titles = {}, {}; suggestions_by_post = defaultdict(list)
@@ -43,16 +51,21 @@ def encode_text_onnx(text: str) -> np.ndarray:
     raw_output = onnx_session.run(None, onnx_inputs)
     pooled = mean_pooling(raw_output, inputs['attention_mask']); return normalize(pooled)
 
-# --- Load Databases ---
+# --- Load Models and Databases ---
 try:
-    print("Loading IMDb master data into memory...")
+    logging.info("Loading ONNX model...")
+    onnx_session = ort.InferenceSession('onnx_model/model.onnx')
+    tokenizer = AutoTokenizer.from_pretrained('onnx_model')
+    
+    logging.info("Loading IMDb master data into memory...")
     imdb_conn = sqlite3.connect(f'file:{IMDB_DB_FILE}?mode=ro', uri=True)
     cursor = imdb_conn.cursor()
     cursor.execute("SELECT tconst, contentRating, averageRating FROM movies")
     for row in cursor.fetchall(): content_rating_lookup[row[0]] = row[1]; imdb_rating_lookup[row[0]] = row[2]
     imdb_conn.close()
-    print(f"Loaded {len(content_rating_lookup)} movie ratings into memory.")
-    print("Loading recommendations database...")
+    logging.info(f"Loaded {len(content_rating_lookup)} movie ratings into memory.")
+
+    logging.info("Loading recommendations database...")
     recs_conn = sqlite3.connect(f'file:{RECS_DB_FILE}?mode=ro', uri=True); recs_conn.row_factory = sqlite3.Row; cursor = recs_conn.cursor()
     cursor.execute("SELECT post_id, post_title, post_vector FROM posts"); posts_data = cursor.fetchall()
     post_vectors = {row['post_id']: npy_blob_to_array(row['post_vector']) for row in posts_data}
@@ -66,39 +79,24 @@ try:
     recs_conn.close()
     sorted_default_catalog = sorted(temp_scores.items(), key=lambda item: item[1]['score'], reverse=True)
     DEFAULT_CATALOG = [{"id": item[0], "title": item[1]['title']} for item in sorted_default_catalog]
-    print(f"Default catalog base created with {len(DEFAULT_CATALOG)} unique movies.")
-except Exception as e: print(f"CRITICAL: Database loading failed: {e}.")
+    logging.info(f"Default catalog base created with {len(DEFAULT_CATALOG)} unique movies.")
+except Exception as e: logging.critical(f"Database loading failed: {e}.", exc_info=True)
 
 app = FastAPI()
 
 @app.get("/manifest.json")
 async def get_manifest():
     return {
-        "id": "com.mjlan.reddit-vibe-recommender-onnx",
-        "version": "1.8.0", # Final version
-        "name": "Reddit Vibe (ONNX)",
-        "description": "Fully configurable, family-friendly movie recommendations",
-        "resources": ["catalog"],
-        "types": ["movie"],
-        "catalogs": [
-            {
-                "type": "movie",
-                "id": "reddit-vibe-catalog",
-                "name": "Reddit Vibe Search",
-                # --- MANIFEST FIX: Using the correct "extra" array of objects format ---
-                "extra": [
-                    {"name": "search", "isRequired": False},
-                    {"name": "skip", "isRequired": False}
-                ]
-            }
-        ]
+        "id": "com.mjlan.reddit-vibe-recommender-onnx", "version": "1.9.0", "name": "Reddit Vibe (ONNX)",
+        "description": "Fully configurable, family-friendly movie recommendations", "resources": ["catalog"], "types": ["movie"],
+        "catalogs": [{"type": "movie", "id": "reddit-vibe-catalog", "name": "Reddit Vibe Search", "extra": [{"name": "search", "isRequired": False}, {"name": "skip", "isRequired": False}]}]
     }
 
 async def _get_catalog_logic(search_query: str = None, skip: int = 0):
     final_items = []
     if search_query:
         if not (tokenizer and onnx_session and post_vectors): return {"metas": []}
-        print(f"Handling search query: '{search_query}', skipping: {skip}")
+        logging.info(f"Handling search query: '{search_query}', skipping: {skip}")
         query_vector = encode_text_onnx(search_query)
         post_ids, all_vectors = list(post_vectors.keys()), np.vstack(list(post_vectors.values()))
         similarities = cosine_similarity(query_vector, all_vectors)[0]
@@ -111,24 +109,26 @@ async def _get_catalog_logic(search_query: str = None, skip: int = 0):
         sorted_suggestions = sorted(weighted_suggestions.items(), key=lambda item: item[1]['score'], reverse=True)
         final_items = [{"id": item[0], "title": item[1]['title']} for item in sorted_suggestions]
     else:
-        print(f"Serving default catalog, skipping: {skip}")
+        logging.info(f"Serving default catalog, skipping: {skip}")
         final_items = DEFAULT_CATALOG
     
-    # --- Runtime Filtering ---
     if MIN_IMDB_RATING > 0: final_items = [item for item in final_items if imdb_rating_lookup.get(item['id'], 0.0) >= MIN_IMDB_RATING]
     if KID_FRIENDLY_MODE: final_items = [item for item in final_items if content_rating_lookup.get(item['id'], 'NR') in ACCEPTABLE_RATINGS]
         
+    logging.info(f"Serving {len(final_items)} items after filtering (before pagination).")
     paginated_items = final_items[skip : skip + PAGE_SIZE]
     metas = [{"id": item['id'], "type": "movie", "name": item['title'], "poster": f"https://images.metahub.space/poster/medium/{item['id']}/img", "posterShape": "poster"} for item in paginated_items]
     return {"metas": metas}
 
 @app.get("/catalog/movie/{catalog_id}.json")
 async def get_default_catalog(catalog_id: str):
+    logging.info(f"Request received for DEFAULT catalog: {catalog_id}")
     if catalog_id != "reddit-vibe-catalog": return JSONResponse(status_code=404, content={"error": "Catalog not found"})
     return await _get_catalog_logic()
 
 @app.get("/catalog/movie/{catalog_id}/{extra_props}.json")
 async def get_catalog_with_extras(catalog_id: str, extra_props: str):
+    logging.info(f"Request received for catalog WITH EXTRAS: {extra_props}")
     if catalog_id != "reddit-vibe-catalog": return JSONResponse(status_code=404, content={"error": "Catalog not found"})
     search_query, skip = None, 0; search_match = re.search(r'search=([^&]+)', extra_props); skip_match = re.search(r'skip=(\d+)', extra_props)
     if search_match: search_query = search_match.group(1)
@@ -136,4 +136,4 @@ async def get_catalog_with_extras(catalog_id: str, extra_props: str):
     return await _get_catalog_logic(search_query=search_query, skip=skip)
 
 @app.get("/")
-async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v1.8 is running."}
+async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v1.9 is running."}
