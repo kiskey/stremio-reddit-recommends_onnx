@@ -4,7 +4,7 @@
 
 This is an intelligent, self-updating recommendation engine that provides movie suggestions based on the collective "vibe" of Reddit's movie communities. It is built on the philosophy of **"Ingest Broadly, Filter Intelligently."** The addon gathers a comprehensive database of all valid movie suggestions and then allows you, the user, to apply powerful filters at runtime to tailor the experience to your exact needs.
 
-Instead of searching for genres, you can search for feelings, moods, or abstract concepts like *"a cozy mystery for a rainy day"* or *"mind-bending movies that will make me question reality."*
+Instead o f searching for genres, you can search for feelings, moods, or abstract concepts like *"a cozy mystery for a rainy day"* or *"mind-bending movies that will make me question reality."*
 
 ## Core Features
 
