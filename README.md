@@ -6,7 +6,7 @@ This is an intelligent, self-updating recommendation engine that provides movie 
 
 Instead o f searching for genres, you can search for feelings, moods, or abstract concepts like *"a cozy mystery for a rainy day"* or *"mind-bending movies that will make me question reality."*
 
-## Core Features
+## CoreFeatures
 
 *   **Vibe-Based Semantic Search:** Uses an AI model to understand the meaning behind your search query.
 *   **Fully Automated:** A GitHub Action runs daily to ingest new suggestions, build the comprehensive database, and publish a new Docker image.
