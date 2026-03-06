@@ -31,14 +31,14 @@ KID_FRIENDLY_MODE = os.getenv('KID_FRIENDLY_MODE', 'false').lower() == 'true'
 MIN_IMDB_RATING = float(os.getenv('MIN_IMDB_RATING', '5.2'))
 ACCEPTABLE_RATINGS = {'G', 'PG', 'PG-13', 'NR'}
 
-logging.info("--- Vibe Recommender (ONNX Edition) v3.3 (Definitive) ---")
+logging.info("--- Vibe Recommender (ONNX Edition) v3.3.4 (Sorting + Fix) ---")
 logging.info(f"Kid-Friendly Mode: {KID_FRIENDLY_MODE}")
 logging.info(f"Minimum IMDb Rating Filter: {MIN_IMDB_RATING}")
 
 # --- Initialize data structures ---
 post_vectors, post_titles = {}, {}; suggestions_by_post = defaultdict(list)
 DEFAULT_CATALOG = []; tokenizer, onnx_session = None, None
-content_rating_lookup = {}; imdb_rating_lookup = {}
+content_rating_lookup = {}; imdb_rating_lookup = {}; imdb_year_lookup = {}
 
 # --- Helper functions ---
 def npy_blob_to_array(text): out = io.BytesIO(text); out.seek(0); return np.load(out)
@@ -60,10 +60,17 @@ try:
     logging.info("Loading IMDb master data into memory...")
     imdb_conn = sqlite3.connect(f'file:{IMDB_DB_FILE}?mode=ro', uri=True)
     cursor = imdb_conn.cursor()
-    cursor.execute("SELECT tconst, contentRating, averageRating FROM movies")
+    # UPDATED: Added startYear to the SELECT
+    cursor.execute("SELECT tconst, contentRating, averageRating, startYear FROM movies")
     for row in cursor.fetchall():
         content_rating_lookup[row[0]] = row[1]
         imdb_rating_lookup[row[0]] = row[2]
+        # Clean and store the year
+        try:
+            imdb_year_lookup[row[0]] = int(row[3]) if row[3] and str(row[3]).isdigit() else 0
+        except:
+            imdb_year_lookup[row[0]] = 0
+            
     imdb_conn.close()
     logging.info(f"Loaded {len(content_rating_lookup)} movie ratings into memory.")
 
@@ -79,8 +86,17 @@ try:
         if row['tt_id'] not in temp_scores: temp_scores[row['tt_id']] = {'score': 0, 'title': row['title']}
         temp_scores[row['tt_id']]['score'] += row['upvotes']
     recs_conn.close()
-    sorted_default_catalog = sorted(temp_scores.items(), key=lambda item: item[1]['score'], reverse=True)
-    DEFAULT_CATALOG = [{"id": item[0], "title": item[1]['title']} for item in sorted_default_catalog]
+    
+    # Pre-build catalog with Year metadata for sorting
+    DEFAULT_CATALOG = [
+        {
+            "id": tt_id, 
+            "title": data['title'], 
+            "score": data['score'], 
+            "year": imdb_year_lookup.get(tt_id, 0)
+        } 
+        for tt_id, data in temp_scores.items()
+    ]
     logging.info(f"Default catalog base created with {len(DEFAULT_CATALOG)} unique movies.")
 except Exception as e:
     logging.critical(f"A critical error occurred during startup data loading: {e}", exc_info=True)
@@ -91,7 +107,7 @@ app = FastAPI()
 async def get_manifest():
     return {
         "id": "com.mjlan.reddit-vibe-recommender-onnx",
-        "version": "3.3.0",
+        "version": "3.3.4",
         "name": "Reddit Vibe (ONNX)",
         "description": "Fully configurable, family-friendly movie recommendations",
         "resources": ["catalog"],
@@ -121,34 +137,53 @@ async def _get_catalog_logic(search_query: str = None, skip: int = 0):
         similarities = cosine_similarity(query_vector, all_vectors)[0]
         top_indices = np.argsort(similarities)[-SIMILAR_POST_COUNT:][::-1]
         similar_post_ids = [post_ids[i] for i in top_indices]
-        weighted_suggestions = defaultdict(lambda: {'score': 0, 'title': ''})
+        weighted_suggestions = defaultdict(lambda: {'score': 0, 'title': '', 'year': 0})
         for post_id in similar_post_ids:
             for suggestion in suggestions_by_post.get(post_id, []):
-                entry = weighted_suggestions[suggestion['id']]; entry['score'] += suggestion['upvotes']; entry['title'] = suggestion['title']
+                entry = weighted_suggestions[suggestion['id']]
+                entry['score'] += suggestion['upvotes']
+                entry['title'] = suggestion['title']
+                entry['year'] = imdb_year_lookup.get(suggestion['id'], 0)
+        
+        # Search queries are sorted by Score (Relevance)
         sorted_suggestions = sorted(weighted_suggestions.items(), key=lambda item: item[1]['score'], reverse=True)
-        final_items = [{"id": item[0], "title": item[1]['title']} for item in sorted_suggestions]
+        final_items = [{"id": item[0], "title": item[1]['title'], "year": item[1]['year']} for item in sorted_suggestions]
     else:
         logging.info(f"Serving default catalog, skipping: {skip}")
+        # Default catalog: we apply filters FIRST, then sort by year
         final_items = DEFAULT_CATALOG
     
-    # --- Runtime Filtering ---
+    # --- Runtime Filtering (IMDb Rating) ---
     if MIN_IMDB_RATING > 0:
         pre_filter_count = len(final_items)
-        filtered_items = []
-        for item in final_items:
-            rating = imdb_rating_lookup.get(item['id'], 0.0)
-            if rating == 0.0 or rating >= MIN_IMDB_RATING:
-                filtered_items.append(item)
-        final_items = filtered_items
+        # Defense in Depth: the 'or 0.0' handles any NoneTypes that might slip through
+        final_items = [item for item in final_items if (imdb_rating_lookup.get(item['id']) or 0.0) == 0.0 or (imdb_rating_lookup.get(item['id']) or 0.0) >= MIN_IMDB_RATING]
         logging.info(f"Applied IMDb rating filter ({MIN_IMDB_RATING}): {pre_filter_count} -> {len(final_items)} items.")
 
+    # --- Runtime Filtering (Kid Friendly) ---
     if KID_FRIENDLY_MODE:
         pre_filter_count = len(final_items)
         final_items = [item for item in final_items if content_rating_lookup.get(item['id'], 'NR') in ACCEPTABLE_RATINGS]
         logging.info(f"Applied Kid-Friendly filter: {pre_filter_count} -> {len(final_items)} items.")
+
+    # --- Sorting Logic ---
+    # If it's NOT a search, sort the filtered items by Year descending
+    if not search_query:
+        final_items.sort(key=lambda x: x.get('year', 0), reverse=True)
+        logging.info("Sorted catalog by year (descending).")
         
+    # --- Pagination ---
     paginated_items = final_items[skip : skip + PAGE_SIZE]
-    metas = [{"id": item['id'], "type": "movie", "name": item['title'], "poster": f"https://images.metahub.space/poster/medium/{item['id']}/img", "posterShape": "poster"} for item in paginated_items]
+    metas = []
+    for item in paginated_items:
+        year_str = f" ({item['year']})" if item.get('year') and item['year'] > 0 else ""
+        metas.append({
+            "id": item['id'], 
+            "type": "movie", 
+            "name": f"{item['title']}{year_str}", 
+            "poster": f"https://images.metahub.space/poster/medium/{item['id']}/img", 
+            "posterShape": "poster"
+        })
     return {"metas": metas}
 
 @app.get("/catalog/movie/{catalog_id}.json")
@@ -165,4 +200,4 @@ async def get_catalog_with_extras(catalog_id: str, extra_props: str):
     return await _get_catalog_logic(search_query=search_query, skip=skip)
 
 @app.get("/")
-async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v3.3 is running."}
+async def root(): return {"message": "Stremio Reddit Vibe Recommender (ONNX Edition) v3.3.4 is running."}
